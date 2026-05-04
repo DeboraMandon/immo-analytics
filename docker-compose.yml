@@ -132,6 +132,23 @@ services:
     volumes:
       - metabase_data:/metabase-data
 
+# ── Ingestion — Scripts de chargement des données ─────────
+  ingestion:
+    build: ./ingestion
+    container_name: immo_ingestion
+    restart: "no"
+    networks:
+      - default
+    environment:
+      DATABASE_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
+      INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
+    volumes:
+      - ./ingestion:/app
+      - dvf_cache:/app/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   airflow_logs:

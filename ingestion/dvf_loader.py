@@ -270,7 +270,7 @@ async def enrich_communes_geo(conn, departements: list[str]):
                         (code_insee, nom, departement, population,
                          latitude, longitude, geom)
                     VALUES ($1, $2, $3, $4, $5, $6,
-                        ST_SetSRID(ST_MakePoint($6, $5), 4326))
+                        ST_SetSRID(ST_MakePoint($6::float8, $5::float8), 4326))
                     ON CONFLICT (code_insee) DO UPDATE SET
                         nom        = EXCLUDED.nom,
                         population = COALESCE(EXCLUDED.population, communes.population),
