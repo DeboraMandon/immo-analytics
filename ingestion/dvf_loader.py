@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
 from statistics import median
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError

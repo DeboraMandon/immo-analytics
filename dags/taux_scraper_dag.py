@@ -13,7 +13,6 @@ Sources :
 """
 from datetime import datetime, timedelta
 import os
-import sys
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator

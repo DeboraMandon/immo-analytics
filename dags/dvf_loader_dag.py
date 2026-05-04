@@ -15,8 +15,6 @@ import os
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
-from airflow.models import Variable
 
 # ── Config ────────────────────────────────────────────────────
 IMMO_DB_URL = os.environ.get("IMMO_DB_URL", "")
