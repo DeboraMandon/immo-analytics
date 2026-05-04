@@ -4,36 +4,44 @@ version: "3.9"
 # immo-analytics — Stack Data Engineering
 #
 # Services :
-#   postgres   : Base de données PostgreSQL + PostGIS
-#   airflow-*  : Orchestration des pipelines (webserver + scheduler + init)
-#   metabase   : Dashboard analytique (zéro code front)
+#   postgres          : PostgreSQL 15 + PostGIS
+#   airflow-init      : Initialisation one-shot (DB + user admin)
+#   airflow-scheduler : Exécution des DAGs
+#   airflow-webserver : Interface UI Airflow
+#   ingestion         : Scripts de chargement des données (one-shot)
+#   metabase          : Dashboards analytiques
+#
+# Ports exposés :
+#   5433 → PostgreSQL  (5432 réservé au PostgreSQL local)
+#   8080 → Airflow UI
+#   3000 → Metabase
 #
 # Démarrage :
-#   cp .env.example .env
+#   cp .env.example .env  # éditer les valeurs
 #   docker compose up -d
-#   → Metabase : http://localhost:3000
-#   → Airflow  : http://localhost:8080
 # ============================================================
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.3
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflow_secret}@postgres:5432/airflow
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-immo_secret_key}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-immo_analytics_secret}
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
     # Variables métier disponibles dans tous les DAGs
     IMMO_DB_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
     INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
+    DVF_ANNEE: ${DVF_ANNEE:-2025}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./ingestion:/opt/airflow/ingestion
     - airflow_logs:/opt/airflow/logs
-    - airflow_plugins:/opt/airflow/plugins
     - dvf_cache:/opt/airflow/cache
   depends_on:
     postgres:
@@ -41,7 +49,8 @@ x-airflow-common: &airflow-common
   user: "${AIRFLOW_UID:-50000}:0"
 
 services:
-  # ── Base de données principale ────────────────────────────
+
+  # ── PostgreSQL + PostGIS ──────────────────────────────────
   postgres:
     image: postgis/postgis:15-3.3
     container_name: immo_postgres
@@ -50,8 +59,6 @@ services:
       POSTGRES_DB: immo_dashboard
       POSTGRES_USER: immo_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-immo_secret}
-      # Base Airflow dans le même postgres (schéma séparé)
-      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_secret}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
@@ -72,7 +79,6 @@ services:
     command:
       - -c
       - |
-        pip install asyncpg httpx beautifulsoup4 lxml psycopg2-binary --quiet
         airflow db migrate
         airflow users create \
           --username ${AIRFLOW_USER:-admin} \
@@ -80,7 +86,7 @@ services:
           --firstname Admin \
           --lastname Immo \
           --role Admin \
-          --email admin@immo-analytics.fr
+          --email admin@immo-analytics.fr || true
         echo "Airflow initialisé"
     restart: "no"
 
@@ -111,7 +117,22 @@ services:
       timeout: 10s
       retries: 5
 
-  # ── Metabase — Dashboard analytique ──────────────────────
+  # ── Ingestion — Scripts de chargement (one-shot) ──────────
+  ingestion:
+    build: ./ingestion
+    container_name: immo_ingestion
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
+      INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
+    volumes:
+      - ./ingestion:/app
+      - dvf_cache:/app/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Metabase — Dashboards analytiques ────────────────────
   metabase:
     image: metabase/metabase:latest
     container_name: immo_metabase
@@ -132,26 +153,8 @@ services:
     volumes:
       - metabase_data:/metabase-data
 
-# ── Ingestion — Scripts de chargement des données ─────────
-  ingestion:
-    build: ./ingestion
-    container_name: immo_ingestion
-    restart: "no"
-    networks:
-      - default
-    environment:
-      DATABASE_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
-      INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
-    volumes:
-      - ./ingestion:/app
-      - dvf_cache:/app/cache
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   pgdata:
   airflow_logs:
-  airflow_plugins:
   dvf_cache:
   metabase_data:
