@@ -1,6 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
@@ -8,3 +9,5 @@ logs/
 cache/
 *.log
 airflow/logs/
+dags/__pycache__/
+ingestion/__pycache__/
