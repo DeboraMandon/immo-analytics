@@ -2,84 +2,143 @@
 
 **Pipeline data engineering — Marché immobilier français**
 
-Stack 100% data engineering : PostgreSQL + Airflow + Metabase.
-Zéro frontend à coder — les dashboards se construisent dans Metabase.
+Suivi des taux de crédit immobilier et des prix au m² par ville en France.
+Architecture 100% data engineering : ingestion automatisée, orchestration Airflow, visualisation Power BI.
 
 ---
 
 ## Architecture
 
 ```
-data.gouv.fr (DVF)  ──┐
-geo.api.gouv.fr     ──┤
-CAFPI / Pretto      ──┤──► Airflow DAGs ──► PostgreSQL ──► Metabase
-INSEE Filosofi      ──┘                      + PostGIS     (dashboards)
+Sources de données          Pipeline              Stockage          Visualisation
+──────────────────          ────────              ────────          ─────────────
+DVF DGFiP              ──►                                          Power BI Desktop
+geo.api.gouv.fr        ──►  Airflow DAGs    ──►  PostgreSQL 15      (.pbip versionné)
+Banque de France (OAT) ──►  (orchestration)      + PostGIS
+CAFPI (taux crédit)    ──►  ingestion/
+                            (scripts Python)
 ```
 
-## Stack
+---
+
+## Stack technique
 
 | Composant | Rôle | Port |
 |---|---|---|
-| PostgreSQL 15 + PostGIS | Stockage données | 5433 |
-| Apache Airflow 2.9 | Orchestration pipelines | 8080 |
-| Metabase | Dashboards analytiques | 3000 |
+| PostgreSQL 15 + PostGIS | Stockage données géospatiales | 5433 |
+| Apache Airflow 2.9 | Orchestration des pipelines | 8080 |
+| Power BI Desktop | Dashboards et visualisation | — |
+| Docker Compose | Infrastructure | — |
 
-## Démarrage
+---
+
+## Démarrage rapide
 
 ```bash
 git clone https://github.com/DeboraMandon/immo-analytics.git
 cd immo-analytics
 cp .env.example .env
-# Editer .env avec vos valeurs
+# Éditer .env : POSTGRES_PASSWORD, AIRFLOW_FERNET_KEY (voir .env.example)
 docker compose up -d
 ```
 
-- **Airflow** : http://localhost:8080 (admin / admin)
-- **Metabase** : http://localhost:3000
+**Interfaces :**
+- Airflow : http://localhost:8080 (admin / admin)
+- PostgreSQL : localhost:5433 (DBeaver, pgAdmin, Power BI)
+
+**Chargement initial des données :**
+```bash
+# Géolocalisation + DVF 2025 (France entière, ~45 min)
+docker compose run --rm ingestion python dvf_loader.py --all-france --annee 2025
+
+# OAT Banque de France (historique depuis 2015)
+docker compose run --rm ingestion python oat_loader.py --depuis 2015-01
+
+# Taux crédit CAFPI
+docker compose run --rm ingestion python taux_scraper.py
+
+# Prédiction taux 6 mois (Prophet)
+docker compose run --rm ingestion python predict_taux.py --all-durees
+```
+
+---
 
 ## DAGs Airflow
 
-| DAG | Schedule | Source | Table |
+| DAG | Schedule | Sources | Tables alimentées |
 |---|---|---|---|
-| `dvf_loader` | 1er avril + 1er oct. | DVF DGFiP | `prix_immobilier` |
-| `taux_scraper` | Quotidien 6h | CAFPI, Pretto | `taux_nationaux` |
-| `insee_loader` | 1er janvier | INSEE Filosofi | `communes` |
+| `dvf_loader` | 1er avril + 1er oct. | DVF DGFiP, geo.api.gouv.fr | `communes`, `prix_immobilier` |
+| `taux_pipeline` | 1er du mois à 6h | CAFPI, Banque de France | `taux_nationaux`, `oat_historique`, `predictions_taux` |
+
+---
 
 ## Schéma base de données
 
 ```sql
-communes          -- 33k communes françaises + coordonnées GPS
-prix_immobilier   -- Prix m² DVF par commune, type, année
-taux_nationaux    -- Taux crédit immobilier historiques
-taux_regionaux    -- Taux par région
-pipeline_log      -- Traçabilité des exécutions
+communes            -- 33k communes françaises, coordonnées GPS, population
+prix_immobilier     -- Prix m² DVF par commune, type de bien, année (2024 + 2025)
+taux_nationaux      -- Taux crédit immobilier mensuels (CAFPI)
+oat_historique      -- OAT 10 ans Banque de France (référence officielle)
+predictions_taux    -- Prédictions Prophet 6 mois avec intervalles de confiance
+pipeline_log        -- Traçabilité de chaque exécution de pipeline
 ```
 
-## Vues analytiques disponibles
+## Vues analytiques
 
 ```sql
-v_prix_recents          -- Prix les plus récents par commune
-v_prix_departement      -- Agrégation par département
-v_prix_region           -- Agrégation par région
-v_taux_actuels          -- Derniers taux par durée
-v_top_communes_par_region  -- Top 10 communes par région
-v_pipeline_status       -- Fraîcheur des données
+v_prix_recents          -- Prix les plus récents par commune (DVF)
+v_prix_departement      -- Agrégation prix par département et année
+v_taux_avec_oat         -- Taux crédit + OAT + spread bancaire
+v_taux_et_predictions   -- Historique + prédictions Prophet (pour Power BI)
+v_pipeline_status       -- Fraîcheur des données par source
 ```
 
-## Migration depuis immo-dashboard
+---
 
-Si vous avez déjà chargé des données dans l'ancien projet :
+## Sources de données
 
-```bash
-# Export depuis l'ancien postgres (port 5432 ou 5433)
-docker exec immo_postgres pg_dump -U immo_user immo_dashboard \
-  -t communes -t prix_immobilier -t taux_nationaux \
-  > backup_immo.sql
+| Source | Données | Licence | Fréquence |
+|---|---|---|---|
+| DVF DGFiP / data.gouv.fr | Prix ventes immobilières | Licence Ouverte Etalab | Semestrielle |
+| geo.api.gouv.fr | Coordonnées GPS, population | Licence Ouverte | Stable |
+| Banque de France | OAT 10 ans | Données publiques | Mensuelle |
+| CAFPI | Taux crédit indicatifs | Page publique (scraping) | Mensuelle |
 
-# Import dans le nouveau postgres
-docker compose exec -T postgres psql -U immo_user immo_dashboard < backup_immo.sql
+### Limites connues
+
+- **DVF** ne couvre pas Haut-Rhin (68), Bas-Rhin (67), Moselle (57), Mayotte (976) — livre foncier local
+- **Taux CAFPI** : indicatifs, hors assurance, profil standard — pas des taux par banque
+- **Prédictions** : fiables sur 1-3 mois, incertaines au-delà de 6 mois
+- **Revenus INSEE** : non chargés par défaut (token requis sur https://portail-api.insee.fr/)
+
+---
+
+## Structure du projet
+
 ```
+immo-analytics/
+├── docker-compose.yml          # Infrastructure Docker
+├── .env.example                # Variables d'environnement (template)
+├── dags/
+│   ├── dvf_loader_dag.py       # DAG semestriel DVF
+│   └── taux_pipeline_dag.py    # DAG mensuel taux + OAT + prédiction
+├── ingestion/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── dvf_loader.py           # Chargement DVF (prix m²)
+│   ├── oat_loader.py           # Chargement OAT Banque de France
+│   ├── taux_scraper.py         # Scraping taux CAFPI
+│   └── predict_taux.py         # Modèle Prophet 6 mois
+├── sql/
+│   ├── init.sql                # Schéma + vues + données seed
+│   └── init_airflow.sql        # Base Airflow
+├── powerbi/                    # Fichiers .pbip (Power BI)
+└── .github/
+    └── workflows/ci.yml        # Lint Python (ruff)
+```
+
+---
 
 ## Licence
 
-MIT — Données : DVF (Licence Ouverte Etalab) · INSEE (Licence Ouverte v2.0)
+MIT — Données : DVF (Licence Ouverte Etalab) · OAT (Banque de France) · INSEE (Licence Ouverte v2.0)
