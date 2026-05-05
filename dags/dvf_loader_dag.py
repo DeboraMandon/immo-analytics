@@ -40,7 +40,8 @@ def _run(args: list[str]) -> None:
 
 
 def check_update(**context):
-    import json, urllib.request
+    import json
+    import urllib.request
     url = "https://www.data.gouv.fr/api/1/datasets/demandes-de-valeurs-foncieres-geolocalisees/"
     try:
         with urllib.request.urlopen(url, timeout=10) as r:
