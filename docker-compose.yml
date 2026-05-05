@@ -32,6 +32,7 @@ x-airflow-common: &airflow-common
     # Variables métier accessibles dans tous les DAGs
     IMMO_DB_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
     INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
+    FRED_API_KEY: ${FRED_API_KEY:-}
     DVF_ANNEE: ${DVF_ANNEE:-2025}
   volumes:
     - ./dags:/opt/airflow/dags
@@ -121,6 +122,7 @@ services:
     environment:
       DATABASE_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
       INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
     volumes:
       - ./ingestion:/app
       - dvf_cache:/app/cache

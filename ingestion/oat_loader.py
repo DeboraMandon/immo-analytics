@@ -1,16 +1,21 @@
 """
-oat_loader.py — Chargement OAT 10 ans Banque de France
+oat_loader.py — Chargement OAT 10 ans France
 
-Source  : API publique Banque de France (webstat.banque-france.fr)
-Série   : FM.M.FR.EUR.FR2.BB.U2_1S.YLD (OAT 10 ans France)
+Source  : FRED (Federal Reserve Bank of St. Louis)
+Série   : IRLTLT01FRM156N — Long-Term Government Bond Yields: 10-year France
+Licence : Publique, gratuite avec clé API FRED (inscription gratuite)
 Table   : oat_historique
 
 L'OAT 10 ans est la référence principale pour les taux de crédit immobilier.
-Une hausse de l'OAT → hausse des taux bancaires dans les semaines suivantes.
+Une hausse de l'OAT entraine une hausse des taux bancaires dans les semaines suivantes.
 
 Usage :
     python oat_loader.py
-    python oat_loader.py --depuis 2020-01
+    python oat_loader.py --depuis 2015-01-01
+
+Variables d'environnement :
+    DATABASE_URL  : URL PostgreSQL
+    FRED_API_KEY  : Clé API FRED (gratuite sur https://fredaccount.stlouisfed.org/apikeys)
 """
 import argparse
 import asyncio
@@ -29,92 +34,80 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://immo_user:immo_secret@postgres:5432/immo_dashboard",
 )
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
-# API Banque de France — données en accès libre, pas de token requis
-BDF_API_URL = (
-    "https://webstat.banque-france.fr/api/download/bdf/"
-    "FM.M.FR.EUR.FR2.BB.U2_1S.YLD"
-    "?format=json&startPeriod={depuis}&endPeriod={jusqua}"
+FRED_URL = (
+    "https://api.stlouisfed.org/fred/series/observations"
+    "?series_id=IRLTLT01FRM156N"
+    "&api_key={api_key}"
+    "&file_type=json"
+    "&observation_start={depuis}"
+    "&frequency=m"
+    "&aggregation_method=avg"
 )
 
 
-async def fetch_oat(depuis: str, jusqua: str) -> list[dict]:
-    """Récupère la série OAT 10 ans depuis l'API Banque de France."""
-    url = BDF_API_URL.format(depuis=depuis, jusqua=jusqua)
-    logger.info(f"Téléchargement OAT {depuis} → {jusqua}")
+async def fetch_oat(depuis: str) -> list[dict]:
+    if not FRED_API_KEY:
+        raise ValueError(
+            "FRED_API_KEY non configurée. "
+            "Clé gratuite sur : https://fredaccount.stlouisfed.org/apikeys"
+        )
+
+    url = FRED_URL.format(api_key=FRED_API_KEY, depuis=depuis)
+    logger.info(f"Téléchargement OAT FRED depuis {depuis}...")
 
     async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error(f"Banque de France API error: {e}")
-            return []
+        resp = await client.get(url)
+        resp.raise_for_status()
+        data = resp.json()
 
-    # Parser la réponse JSON Banque de France
-    # Structure : data → dataSets → [0] → series → {"0:0:0:0:0:0:0:0": {observations}}
-    rows = []
-    try:
-        series = data["dataSets"][0]["series"]
-        observations = list(series.values())[0]["observations"]
-        periods = data["structure"]["dimensions"]["observation"][0]["values"]
-
-        for i, period_info in enumerate(periods):
-            period = period_info["id"]  # Format : "2024-01"
-            obs    = observations.get(str(i))
-            if obs and obs[0] is not None:
-                rows.append({
-                    "period": period,
-                    "valeur": float(obs[0]),
-                })
-    except (KeyError, IndexError, TypeError) as e:
-        logger.error(f"Erreur parsing BdF: {e}")
-        return []
+    rows = [
+        {"date_obs": obs["date"], "valeur": float(obs["value"])}
+        for obs in data.get("observations", [])
+        if obs["value"] != "."
+    ]
 
     logger.info(f"{len(rows)} observations OAT récupérées")
     return rows
 
 
 async def insert_oat(conn, rows: list[dict]) -> int:
-    """Insère les données OAT en base."""
     inserted = 0
     for row in rows:
         try:
-            # Convertir "2024-01" en date
-            date_obs = datetime.strptime(row["period"] + "-01", "%Y-%m-%d").date()
+            date_obs = datetime.strptime(row["date_obs"], "%Y-%m-%d").date()
             await conn.execute("""
                 INSERT INTO oat_historique (date_obs, valeur, source)
-                VALUES ($1, $2, 'Banque de France')
+                VALUES ($1, $2, 'FRED/OCDE')
                 ON CONFLICT (date_obs) DO UPDATE SET
                     valeur     = EXCLUDED.valeur,
+                    source     = EXCLUDED.source,
                     updated_at = NOW()
             """, date_obs, row["valeur"])
             inserted += 1
         except Exception as e:
-            logger.debug(f"Insert OAT {row['period']}: {e}")
+            logger.debug(f"Insert OAT {row['date_obs']}: {e}")
     return inserted
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Chargement OAT 10 ans Banque de France")
-    parser.add_argument("--depuis",  default="2015-01", help="Période de début (YYYY-MM)")
-    parser.add_argument("--jusqua",  default=datetime.now().strftime("%Y-%m"),
-                        help="Période de fin (YYYY-MM)")
+    parser = argparse.ArgumentParser(description="Chargement OAT 10 ans (FRED)")
+    parser.add_argument("--depuis", default="2015-01-01")
     args = parser.parse_args()
 
     t0   = time.monotonic()
     conn = await asyncpg.connect(DATABASE_URL)
 
     try:
-        rows     = await fetch_oat(args.depuis, args.jusqua)
+        rows     = await fetch_oat(args.depuis)
         inserted = await insert_oat(conn, rows)
 
         await conn.execute("""
             INSERT INTO pipeline_log (dag_id, source, type, status, records, duration_s)
             VALUES ($1,$2,$3,$4,$5,$6)
-        """, "oat_loader", "Banque de France", "oat", "success",
-             inserted, round(time.monotonic() - t0, 2))
+        """, "oat_loader", "FRED/OCDE", "oat", "success",
+             inserted, round(time.monotonic()-t0, 2))
 
         logger.info(f"✅ OAT chargé — {inserted} observations en {time.monotonic()-t0:.1f}s")
 
