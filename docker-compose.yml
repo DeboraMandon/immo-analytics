@@ -4,37 +4,32 @@ version: "3.9"
 # immo-analytics — Stack Data Engineering
 #
 # Services :
-#   postgres          : PostgreSQL 15 + PostGIS
-#   airflow-init      : Initialisation one-shot (DB + user admin)
+#   postgres          : PostgreSQL 15 + PostGIS (données)
+#   airflow-init      : Initialisation one-shot
 #   airflow-scheduler : Exécution des DAGs
-#   airflow-webserver : Interface UI Airflow
-#   ingestion         : Scripts de chargement des données (one-shot)
-#   metabase          : Dashboards analytiques
+#   airflow-webserver : Interface UI Airflow :8080
+#   ingestion         : Scripts de chargement (one-shot)
 #
-# Ports exposés :
-#   5433 → PostgreSQL  (5432 réservé au PostgreSQL local)
-#   8080 → Airflow UI
-#   3000 → Metabase
+# Visualisation : Power BI Desktop (connexion directe port 5433)
 #
 # Démarrage :
-#   cp .env.example .env  # éditer les valeurs
+#   cp .env.example .env
 #   docker compose up -d
+#   → Airflow : http://localhost:8080 (admin/admin)
 # ============================================================
 
 x-airflow-common: &airflow-common
-  build:
-    context: .
-    dockerfile: Dockerfile.airflow
+  image: apache/airflow:2.9.3
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflow_secret}@postgres:5432/airflow
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
-    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-immo_analytics_secret}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-immo_secret}
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
-    # Variables métier disponibles dans tous les DAGs
+    # Variables métier accessibles dans tous les DAGs
     IMMO_DB_URL: postgresql://immo_user:${POSTGRES_PASSWORD:-immo_secret}@postgres:5432/immo_dashboard
     INSEE_API_TOKEN: ${INSEE_API_TOKEN:-}
     DVF_ANNEE: ${DVF_ANNEE:-2025}
@@ -50,7 +45,7 @@ x-airflow-common: &airflow-common
 
 services:
 
-  # ── PostgreSQL + PostGIS ──────────────────────────────────
+  # ── PostgreSQL 15 + PostGIS ───────────────────────────────
   postgres:
     image: postgis/postgis:15-3.3
     container_name: immo_postgres
@@ -64,14 +59,14 @@ services:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
       - ./sql/init_airflow.sql:/docker-entrypoint-initdb.d/02_airflow.sql
     ports:
-      - "5433:5432"
+      - "5433:5432"   # 5433 = évite conflit avec PostgreSQL local
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U immo_user -d immo_dashboard"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── Airflow — Init (one-shot) ─────────────────────────────
+  # ── Airflow Init (one-shot) ───────────────────────────────
   airflow-init:
     <<: *airflow-common
     container_name: immo_airflow_init
@@ -79,6 +74,7 @@ services:
     command:
       - -c
       - |
+        pip install asyncpg httpx beautifulsoup4 lxml psycopg2-binary prophet --quiet
         airflow db migrate
         airflow users create \
           --username ${AIRFLOW_USER:-admin} \
@@ -87,10 +83,10 @@ services:
           --lastname Immo \
           --role Admin \
           --email admin@immo-analytics.fr || true
-        echo "Airflow initialisé"
+        echo "✅ Airflow initialisé"
     restart: "no"
 
-  # ── Airflow — Scheduler ───────────────────────────────────
+  # ── Airflow Scheduler ─────────────────────────────────────
   airflow-scheduler:
     <<: *airflow-common
     container_name: immo_airflow_scheduler
@@ -100,7 +96,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # ── Airflow — Webserver ───────────────────────────────────
+  # ── Airflow Webserver ─────────────────────────────────────
   airflow-webserver:
     <<: *airflow-common
     container_name: immo_airflow_webserver
@@ -117,7 +113,7 @@ services:
       timeout: 10s
       retries: 5
 
-  # ── Ingestion — Scripts de chargement (one-shot) ──────────
+  # ── Ingestion (one-shot manuel) ───────────────────────────
   ingestion:
     build: ./ingestion
     container_name: immo_ingestion
@@ -132,29 +128,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # ── Metabase — Dashboards analytiques ────────────────────
-  metabase:
-    image: metabase/metabase:latest
-    container_name: immo_metabase
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      MB_DB_TYPE: postgres
-      MB_DB_DBNAME: metabase
-      MB_DB_PORT: 5432
-      MB_DB_USER: immo_user
-      MB_DB_PASS: ${POSTGRES_PASSWORD:-immo_secret}
-      MB_DB_HOST: postgres
-      JAVA_TIMEZONE: Europe/Paris
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - metabase_data:/metabase-data
-
 volumes:
   pgdata:
   airflow_logs:
   dvf_cache:
-  metabase_data:
