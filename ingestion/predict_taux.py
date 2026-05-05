@@ -37,24 +37,25 @@ DATABASE_URL = os.environ.get(
 
 
 async def load_data(conn, duree_ans: int) -> pd.DataFrame:
-    """Charge l'historique des taux depuis la base."""
     rows = await conn.fetch("""
         SELECT
-            DATE_TRUNC('month', date_obs)::date AS ds,
-            AVG(taux_moyen)                     AS y,
-            AVG(t.valeur)                       AS oat
+            DATE_TRUNC('month', tn.date_obs)::date AS ds,
+            AVG(tn.taux_moyen)                     AS y,
+            AVG(o.valeur)                          AS oat
         FROM taux_nationaux tn
-        LEFT JOIN oat_historique t
-            ON DATE_TRUNC('month', t.date_obs) = DATE_TRUNC('month', tn.date_obs)
+        LEFT JOIN oat_historique o
+            ON DATE_TRUNC('month', o.date_obs) = DATE_TRUNC('month', tn.date_obs)
         WHERE tn.duree_ans = $1
-        GROUP BY DATE_TRUNC('month', date_obs)
+        GROUP BY DATE_TRUNC('month', tn.date_obs)
         ORDER BY ds
     """, duree_ans)
 
     df = pd.DataFrame([dict(r) for r in rows])
+    if df.empty:
+        return df
     df["ds"] = pd.to_datetime(df["ds"])
     df["y"]  = df["y"].astype(float)
-    return df
+    return df   # ← vérifier que cette ligne existe
 
 
 def train_predict(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
@@ -64,12 +65,13 @@ def train_predict(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
         yearly_seasonality=False,
         weekly_seasonality=False,
         daily_seasonality=False,
-        changepoint_prior_scale=0.05,  # Conservateur — marché immobilier peu volatile
+        changepoint_prior_scale=0.05,
+        n_changepoints=10,
     )
 
     # Ajouter l'OAT comme régresseur externe si disponible
     if "oat" in df.columns and df["oat"].notna().sum() > 5:
-        df["oat"] = df["oat"].fillna(method="ffill")
+        df["oat"] = df["oat"].ffill()
         m.add_regressor("oat")
         logger.info("OAT 10 ans ajouté comme régresseur")
 
@@ -145,7 +147,7 @@ async def main():
             logger.info(f"Prédiction taux {duree} ans — horizon {args.horizon} mois")
 
             df = await load_data(conn, duree)
-            if len(df) < 12:
+            if df is None or df.empty or len(df) < 12:
                 logger.warning(f"Données insuffisantes pour {duree} ans ({len(df)} mois) — minimum 12 requis")
                 continue
 
